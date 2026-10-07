@@ -7,7 +7,7 @@
 <style>
   html, body { margin:0; height:100%; overflow:hidden; background:#ECEDEB; }
   canvas { display:block; }
-  #hud { position:fixed; top:10px; left:12px; z-index:20; pointer-events:none;
+  #hud { display:none; position:fixed; top:10px; left:12px; z-index:20; pointer-events:none;
         font:11px/1.5 ui-monospace,Menlo,Consolas,monospace; color:#33332f;
         background:rgba(255,255,255,0.7); backdrop-filter:blur(6px);
         padding:6px 9px; border-radius:8px; white-space:pre; }
@@ -921,7 +921,8 @@
   paw.scale.set(1.7, 0.7, 0.8); paw.position.set(-0.45, 0.40, 0); rabbit.add(paw);
 
   let wagonActive = false;
-  let lastCollectionTime = Date.now();   // the 수레 returns one minute after each visit
+  const VISIT_EVERY = 15*1000;           // the 수레 returns every 15 seconds
+  let lastCollectionTime = Date.now();
   const cartRiders = [];
 
   function collectFlowers(loadDur) {
@@ -987,8 +988,7 @@
 
     if (sec !== prevSec) {
       cutRose(ROSES[sec]);               // one rose falls every second
-      if (!wagonActive && pileFlowers.length > 0 &&
-          Date.now() - lastCollectionTime >= 60*1000) {
+      if (!wagonActive && Date.now() - lastCollectionTime >= VISIT_EVERY) {
         lastCollectionTime = Date.now();
         runWagon();
       }
@@ -1020,6 +1020,7 @@
     }
     requestAnimationFrame(animate);
   }
+  runWagon();                                      // the rabbit arrives right at load
   animate();
 })();
 </script>
